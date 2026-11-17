@@ -1,0 +1,78 @@
+name: Build exporter
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    container: debian:bookworm-slim
+    defaults:
+      run:
+        shell: bash
+    env:
+      PACKAGE_NAME: prometheus-puppetfile-exporter
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            binutils ca-certificates git libpython3.11 python3-venv
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Build and smoke-test the executable
+        run: |
+          python3 -m venv "$RUNNER_TEMP/exporter-build-venv"
+          python="$RUNNER_TEMP/exporter-build-venv/bin/python"
+          "$python" -m pip install -r requirements.txt 'pyinstaller==6.22.3'
+          "$python" -m PyInstaller --onefile --name "$PACKAGE_NAME" puppetfile_exporter.py
+          "dist/$PACKAGE_NAME" --help
+
+          arch=$(dpkg --print-architecture)
+          mkdir -p artifacts
+          tar -czf "artifacts/${PACKAGE_NAME}-linux-${arch}.tar.gz" -C dist "$PACKAGE_NAME"
+
+      - name: Build and smoke-test the Debian package
+        run: |
+          version="0.1.0~ci.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          arch=$(dpkg --print-architecture)
+          staging=$(mktemp -d)
+          trap 'rm -rf "$staging"' EXIT
+          root="$staging/package"
+
+          install -d "$root/DEBIAN"
+          install -Dm755 "dist/$PACKAGE_NAME" "$root/usr/bin/$PACKAGE_NAME"
+          cat > "$root/DEBIAN/control" <<EOF
+          Package: $PACKAGE_NAME
+          Version: $version
+          Architecture: $arch
+          Maintainer: $GITHUB_REPOSITORY_OWNER <${GITHUB_REPOSITORY_OWNER_ID}+${GITHUB_REPOSITORY_OWNER}@users.noreply.github.com>
+          Depends: ca-certificates, git, libc6 (>= 2.36), zlib1g
+          Section: utils
+          Priority: optional
+          Homepage: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}
+          Description: Prometheus exporter for Puppetfile module versions
+           Compares Puppet module versions with the latest versions from Forge and Git.
+          EOF
+
+          package="artifacts/${PACKAGE_NAME}_${version}_${arch}.deb"
+          dpkg-deb --root-owner-group --build "$root" "$package"
+          dpkg-deb --info "$package"
+          dpkg-deb --extract "$package" "$staging/extracted"
+          "$staging/extracted/usr/bin/$PACKAGE_NAME" --help
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: exporter-debian-amd64-${{ github.run_attempt }}
+          path: artifacts/
+          if-no-files-found: error
+          compression-level: 0

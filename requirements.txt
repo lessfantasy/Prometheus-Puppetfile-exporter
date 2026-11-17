@@ -1,0 +1,5 @@
+argparse
+prometheus-client
+python-gitlab
+requests
+gitpython
